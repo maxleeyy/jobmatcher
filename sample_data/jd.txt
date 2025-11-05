@@ -1,0 +1,5 @@
+Data Analyst (NLP) – Responsibilities
+- Build data pipelines and dashboards (Python, SQL)
+- Apply text analytics / embeddings for similarity and retrieval
+- Communicate results with stakeholders; deploy quick demos (Streamlit)
+- Bonus: experience with LLM prompting and OpenAI APIs
