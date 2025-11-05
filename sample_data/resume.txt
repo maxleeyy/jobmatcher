@@ -1,0 +1,12 @@
+Max Lee – Data Analyst
+Email: maxlee_321@outlook.com
+
+Summary
+Data analyst with 3+ years building dashboards and NLP prototypes. Experienced with Python, SQL, and Streamlit.
+
+Experience
+- Built customer churn dashboard (Pandas, Plotly, PostgreSQL); reduced churn by 6% after adoption.
+- Implemented basic resume parser and job matching proof-of-concept using embeddings.
+
+Skills
+Python, SQL, Pandas, Streamlit, Scikit-learn, Transformers, SentenceTransformers, Git, Docker
