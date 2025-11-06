@@ -1,0 +1,7 @@
+pair_id,resume_path,jd_path,label
+1,data/resumes/r1.txt,data/jds/j1.txt,2
+2,data/resumes/r2.txt,data/jds/j1.txt,1
+3,data/resumes/r3.txt,data/jds/j1.txt,0
+4,data/resumes/r2.txt,data/jds/j2.txt,2
+5,data/resumes/r1.txt,data/jds/j2.txt,1
+6,data/resumes/r3.txt,data/jds/j2.txt,0
