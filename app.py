@@ -1,72 +1,158 @@
 import streamlit as st
-from utils.text_io import read_any, clean_text
-from matcher import compute_match_score, gap_analysis
-from rewriter import rewrite_resume
+from sentence_transformers import SentenceTransformer, util
+from openai import OpenAI
+import os
 
-st.set_page_config(page_title="Job Matcher & CV Optimizer", page_icon="🎯", layout="wide")
+# ========== CONFIG ==========
+st.set_page_config(page_title="AI-Powered Job Matcher + CV Optimizer", layout="wide")
 
-st.title("🎯 AI-Powered Job Matcher & CV Optimizer")
-st.caption(
-    "Upload/Paste your resume and a target Job Description. "
-    "Get a Job Match Score, keyword gaps, and an LLM-tailored resume. "
-    "This app does not store your data."
+# ========== PROMPT TEMPLATES ==========
+BASE_SYSTEM = (
+    "You are an expert HR resume coach. Preserve factual accuracy—"
+    "do not invent employers, dates, titles, or metrics. Improve clarity, "
+    "ATS compatibility, and relevance to the target job."
 )
 
-col1, col2 = st.columns(2)
+TEMPLATES = {
+    "Full Resume Rewrite": """\
+Rewrite the resume to better align with the job description.
+Rules:
+- Keep facts truthful; DO NOT add new experience/skills.
+- Emphasize relevant tools, skills, and achievements for this role.
+- Use concise bullet points and impact verbs (STAR when possible).
+- Keep under ~2 pages when rendered as text.
 
-with col1:
-    st.subheader("Resume")
-    r_file = st.file_uploader("Upload resume (.pdf/.docx/.txt) or paste below",
-                              type=["pdf","docx","txt"], key="resume_file")
-    resume_text = st.text_area("Or paste resume text", height=260, key="resume_text")
-    if r_file:
-        bytes_data = r_file.read()
-        resume_text = read_any(bytes_data, r_file.name)
+JOB DESCRIPTION:
+{job_desc}
 
-with col2:
-    st.subheader("Job Description")
-    j_file = st.file_uploader("Upload JD (.pdf/.docx/.txt) or paste below",
-                              type=["pdf","docx","txt"], key="jd_file")
-    jd_text = st.text_area("Or paste job description", height=260, key="jd_text")
-    if j_file:
-        bytes_data = j_file.read()
-        jd_text = read_any(bytes_data, j_file.name)
+RESUME (SOURCE TRUTH):
+{resume}
+""",
 
-st.markdown("---")
-if st.button("Analyze & Optimize", type="primary", use_container_width=True):
+    "Summary Only": """\
+Rewrite ONLY the resume SUMMARY to fit the job description.
+- Keep facts truthful; do not add non-existent skills.
+- 3–5 lines, crisp, skills-forward, with 1 metric if present.
+
+JOB DESCRIPTION:
+{job_desc}
+
+RESUME SUMMARY:
+{resume}
+""",
+
+    "Skills Alignment": """\
+Produce a revised SKILLS section aligned to the job description.
+- Include only skills actually present in the resume.
+- Group by categories (Programming, Data, Cloud, Tools, etc.)
+- Keep it compact and ATS-friendly.
+
+JOB DESCRIPTION:
+{job_desc}
+
+RESUME SKILLS:
+{resume}
+""",
+
+    "STAR Bullets (Experience)": """\
+Rewrite the EXPERIENCE bullets using the STAR pattern (Situation-Task-Action-Result)
+for RELEVANT roles only. Do not fabricate metrics.
+
+JOB DESCRIPTION:
+{job_desc}
+
+RESUME EXPERIENCE:
+{resume}
+""",
+
+    "CN/EN Bilingual Summary": """\
+Write a bilingual summary (Chinese + English), 2–3 lines each,
+aligned to the job description. Keep strictly to resume facts.
+
+JD:
+{job_desc}
+
+RESUME SUMMARY:
+{resume}
+""",
+}
+
+# ========== MATCHING MODEL ==========
+@st.cache_resource
+def load_match_model():
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
+model = load_match_model()
+
+def compute_match_score(resume_text, job_desc):
+    emb_resume = model.encode(resume_text, convert_to_tensor=True)
+    emb_job = model.encode(job_desc, convert_to_tensor=True)
+    score = util.cos_sim(emb_resume, emb_job).item()
+    return round(score * 100, 2)
+
+# ========== OPENAI REWRITER ==========
+def get_openai_key():
+    return os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", "")
+
+def rewrite_resume(resume_text, job_desc, template, system_prompt, model_name, temperature=0.2):
+    key = get_openai_key()
+    if not key:
+        return "[ERROR] Missing OPENAI_API_KEY. Add it in Streamlit → Settings → Secrets."
+    client = OpenAI(api_key=key)
+
+    user_prompt = template.format(job_desc=job_desc, resume=resume_text)
+    resp = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=temperature,
+    )
+    return resp.choices[0].message.content.strip()
+
+# ========== APP UI ==========
+st.title("🤖 AI-Powered Job Matcher & CV Optimizer")
+st.write("Upload or paste your resume and job description below to see your match score and optimized resume.")
+
+resume_text = st.text_area("📄 Paste your Resume", height=300)
+jd_text = st.text_area("💼 Paste Job Description", height=250)
+
+# ===== Settings Section =====
+st.markdown("### ⚙️ Settings")
+colA, colB, colC = st.columns(3)
+with colA:
+    template_name = st.selectbox("Rewrite Template", list(TEMPLATES.keys()), index=0)
+with colB:
+    model_choice = st.selectbox("LLM Model", ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"], index=0)
+with colC:
+    temperature = st.slider("Creativity (temperature)", 0.0, 1.0, 0.2, 0.1)
+
+# ===== Analyze Button =====
+if st.button("🚀 Analyze & Optimize", use_container_width=True):
     if not resume_text or not jd_text:
-        st.error("Please provide both resume and job description.")
+        st.error("Please paste both resume and job description.")
     else:
-        resume_text = clean_text(resume_text)
-        jd_text = clean_text(jd_text)
-
-        with st.spinner("Computing Job Match Score..."):
+        with st.spinner("Calculating job match score..."):
             score = compute_match_score(resume_text, jd_text)
-            gaps = gap_analysis(resume_text, jd_text)
-        st.success(f"Job Match Score: **{score}%**")
+        st.success(f"🎯 Job Match Score: {score}%")
 
-        with st.expander("Keyword Gap Analysis", expanded=True):
-            colA, colB = st.columns(2)
-            with colA:
-                st.markdown("**Missing (consider addressing):**")
-                if gaps["missing_keywords"]:
-                    st.write(", ".join(gaps["missing_keywords"]))
-                else:
-                    st.write("None detected — great alignment!")
-            with colB:
-                st.markdown("**Already Present:**")
-                st.write(", ".join(gaps["present_keywords"]))
+        st.markdown("---")
+        with st.spinner("Rewriting resume with AI..."):
+            optimized = rewrite_resume(
+                resume_text,
+                jd_text,
+                TEMPLATES[template_name],
+                BASE_SYSTEM,
+                model_choice,
+                temperature,
+            )
 
-        with st.spinner("Rewriting resume with LLM (facts preserved)..."):
-            optimized = rewrite_resume(resume_text, jd_text)
+        st.subheader("🧠 Optimized Resume")
+        st.text_area("", optimized, height=400)
+        st.download_button("💾 Download Optimized Resume", optimized, file_name="optimized_resume.txt")
 
-        st.subheader("Optimized Resume (LLM)")
-        st.text_area("", optimized, height=420)
-        st.download_button("Download Optimized Resume (.txt)",
-                           optimized, file_name="optimized_resume.txt",
-                           use_container_width=True)
+# ===== Footer =====
+st.markdown("---")
+st.caption("Built by Max Lee — Powered by OpenAI GPT & SentenceTransformers")
 
-st.markdown(
-    "**Privacy:** Uploaded content is processed in-memory for this session only.  \n"
-    "**Disclaimer:** This tool improves presentation and alignment; it does not alter your actual qualifications."
-)
