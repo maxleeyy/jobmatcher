@@ -1,5 +1,4 @@
-import os
-import io
+import os, io
 import streamlit as st
 from sentence_transformers import SentenceTransformer, util
 from openai import OpenAI
@@ -81,11 +80,11 @@ RESUME SUMMARY:
 }
 
 # ----------------------------
-# Helpers: read TXT / PDF / DOCX in one place
+# File readers (TXT / PDF / DOCX)
 # ----------------------------
 def read_any(uploaded_file) -> str:
-    """Return plain text from uploaded TXT/PDF/DOCX."""
-    import PyPDF2
+    """Return plain text from uploaded TXT/PDF/DOCX (uses pypdf, python-docx)."""
+    from pypdf import PdfReader
     from docx import Document
 
     name = (uploaded_file.name or "").lower()
@@ -95,7 +94,7 @@ def read_any(uploaded_file) -> str:
         return data.decode("utf-8", errors="ignore")
 
     if name.endswith(".pdf"):
-        reader = PyPDF2.PdfReader(io.BytesIO(data))
+        reader = PdfReader(io.BytesIO(data))
         pages = []
         for p in reader.pages:
             try:
@@ -129,11 +128,10 @@ def clean_text(t: str) -> str:
     return "\n".join(out).strip()
 
 # ----------------------------
-# Embedding model for match score
+# Embeddings for Job Match Score
 # ----------------------------
 @st.cache_resource
 def load_embed():
-    # small, fast model
     return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
 embed_model = load_embed()
@@ -205,66 +203,3 @@ jd_text = clean_text(jd_text)
 # ----------------------------
 # Settings (template/model/temp)
 # ----------------------------
-st.markdown("### ⚙️ Settings")
-c1, c2, c3 = st.columns(3)
-with c1:
-    tpl_name = st.selectbox("Rewrite Template", list(TEMPLATES.keys()), index=0)
-with c2:
-    model_choice = st.selectbox("LLM Model", ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"], index=0)
-with c3:
-    temperature = st.slider("Creativity (temperature)", 0.0, 1.0, 0.2, 0.1)
-
-# ----------------------------
-# Run
-# ----------------------------
-st.markdown("---")
-if st.button("🚀 Analyze & Optimize", use_container_width=True):
-    if not resume_text or not jd_text:
-        st.error("Please provide both the resume and the job description (upload or paste).")
-    else:
-        with st.spinner("Calculating Job Match Score..."):
-            score = compute_match_score(resume_text, jd_text)
-            missing, present = keyword_gap(resume_text, jd_text)
-        st.success(f"🎯 Job Match Score: **{score}%**")
-
-        with st.expander("🔎 Keyword Gap Analysis", expanded=True):
-            a, b = st.columns(2)
-            with a:
-                st.markdown("**Missing keywords (consider addressing):**")
-                st.write(", ".join(missing) if missing else "None — great alignment.")
-            with b:
-                st.markdown("**Already present:**")
-                st.write(", ".join(present) if present else "—")
-
-        st.markdown("---")
-        with st.spinner("Rewriting resume (facts preserved)..."):
-            optimized = rewrite_resume(
-                resume_text, jd_text,
-                TEMPLATES[tpl_name], BASE_SYSTEM,
-                model_choice, temperature
-            )
-
-        st.subheader("🧠 Optimized Resume")
-        st.text_area("", optimized, height=420)
-        st.download_button("💾 Download Optimized Resume (.txt)", optimized, file_name="optimized_resume.txt", use_container_width=True)
-
-        # ---- A/B compare (optional) ----
-        st.markdown("---")
-        st.markdown("### 🧪 A/B Model Comparison (optional)")
-        if st.checkbox("Compare two models side-by-side"):
-            m2 = st.selectbox("Second model", ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"], index=2, key="m2")
-            colx, coly = st.columns(2)
-            with colx:
-                st.write(f"**Model: {model_choice}**")
-                out1 = rewrite_resume(resume_text, jd_text, TEMPLATES[tpl_name], BASE_SYSTEM, model_choice, temperature)
-                st.text_area("", out1, height=320)
-            with coly:
-                st.write(f"**Model: {m2}**")
-                out2 = rewrite_resume(resume_text, jd_text, TEMPLATES[tpl_name], BASE_SYSTEM, m2, temperature)
-                st.text_area("", out2, height=320)
-
-# ----------------------------
-# Footer
-# ----------------------------
-st.markdown("---")
-st.caption("Privacy: content is processed in memory only. This tool improves presentation, not qualifications.")
