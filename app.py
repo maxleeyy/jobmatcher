@@ -3,8 +3,8 @@ from sentence_transformers import SentenceTransformer, util
 from openai import OpenAI
 import os
 
-# ========== CONFIG ==========
-st.set_page_config(page_title="AI-Powered Job Matcher + CV Optimizer", layout="wide")
+# ========== PAGE CONFIG ==========
+st.set_page_config(page_title="AI Job Matcher + CV Optimizer", layout="wide")
 
 # ========== PROMPT TEMPLATES ==========
 BASE_SYSTEM = (
@@ -77,12 +77,12 @@ RESUME SUMMARY:
 """,
 }
 
-# ========== MATCHING MODEL ==========
+# ========== LOAD MATCH MODEL ==========
 @st.cache_resource
-def load_match_model():
+def load_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
-model = load_match_model()
+model = load_model()
 
 def compute_match_score(resume_text, job_desc):
     emb_resume = model.encode(resume_text, convert_to_tensor=True)
@@ -90,7 +90,7 @@ def compute_match_score(resume_text, job_desc):
     score = util.cos_sim(emb_resume, emb_job).item()
     return round(score * 100, 2)
 
-# ========== OPENAI REWRITER ==========
+# ========== OPENAI REWRITE ==========
 def get_openai_key():
     return os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", "")
 
@@ -111,14 +111,14 @@ def rewrite_resume(resume_text, job_desc, template, system_prompt, model_name, t
     )
     return resp.choices[0].message.content.strip()
 
-# ========== APP UI ==========
+# ========== STREAMLIT APP ==========
 st.title("🤖 AI-Powered Job Matcher & CV Optimizer")
-st.write("Upload or paste your resume and job description below to see your match score and optimized resume.")
+st.write("Upload or paste your resume and job description below to get your match score and optimized resume.")
 
 resume_text = st.text_area("📄 Paste your Resume", height=300)
 jd_text = st.text_area("💼 Paste Job Description", height=250)
 
-# ===== Settings Section =====
+# ===== Settings =====
 st.markdown("### ⚙️ Settings")
 colA, colB, colC = st.columns(3)
 with colA:
@@ -151,6 +151,32 @@ if st.button("🚀 Analyze & Optimize", use_container_width=True):
         st.subheader("🧠 Optimized Resume")
         st.text_area("", optimized, height=400)
         st.download_button("💾 Download Optimized Resume", optimized, file_name="optimized_resume.txt")
+
+        # ===== Optional A/B Testing =====
+        st.markdown("---")
+        st.markdown("### 🧪 A/B Model Comparison (optional)")
+        ab = st.checkbox("Compare two models side-by-side")
+
+        if ab:
+            m1 = model_choice
+            m2 = st.selectbox("Second model", ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"], index=2, key="m2")
+            colx, coly = st.columns(2)
+
+            with colx:
+                st.write(f"**Model: {m1}**")
+                out1 = rewrite_resume(
+                    resume_text, jd_text,
+                    TEMPLATES[template_name], BASE_SYSTEM, m1, temperature,
+                )
+                st.text_area("", out1, height=320)
+
+            with coly:
+                st.write(f"**Model: {m2}**")
+                out2 = rewrite_resume(
+                    resume_text, jd_text,
+                    TEMPLATES[template_name], BASE_SYSTEM, m2, temperature,
+                )
+                st.text_area("", out2, height=320)
 
 # ===== Footer =====
 st.markdown("---")
