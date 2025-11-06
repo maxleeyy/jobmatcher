@@ -1,0 +1,1 @@
+Build dashboards with Python/SQL, apply text analytics/embeddings, ship Streamlit demos, bonus OpenAI.
