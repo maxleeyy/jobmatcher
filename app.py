@@ -1,14 +1,21 @@
+import os
+import io
 import streamlit as st
 from sentence_transformers import SentenceTransformer, util
 from openai import OpenAI
-import os
 
-# ========== PAGE CONFIG ==========
-st.set_page_config(page_title="AI Job Matcher + CV Optimizer", layout="wide")
+# ----------------------------
+# Page config
+# ----------------------------
+st.set_page_config(page_title="AI Job Matcher + CV Optimizer", page_icon="🎯", layout="wide")
+st.title("🤖 AI-Powered Job Matcher & CV Optimizer")
+st.write("Upload or paste your resume and job description to get a match score, keyword alignment, and an AI-optimized resume.")
 
-# ========== PROMPT TEMPLATES ==========
+# ----------------------------
+# Prompt templates (built-in)
+# ----------------------------
 BASE_SYSTEM = (
-    "You are an expert HR resume coach. Preserve factual accuracy—"
+    "You are an expert HR resume coach. Preserve factual accuracy — "
     "do not invent employers, dates, titles, or metrics. Improve clarity, "
     "ATS compatibility, and relevance to the target job."
 )
@@ -28,11 +35,10 @@ JOB DESCRIPTION:
 RESUME (SOURCE TRUTH):
 {resume}
 """,
-
     "Summary Only": """\
 Rewrite ONLY the resume SUMMARY to fit the job description.
 - Keep facts truthful; do not add non-existent skills.
-- 3–5 lines, crisp, skills-forward, with 1 metric if present.
+- 3–5 lines, skills-forward, include 1 metric if present.
 
 JOB DESCRIPTION:
 {job_desc}
@@ -40,7 +46,6 @@ JOB DESCRIPTION:
 RESUME SUMMARY:
 {resume}
 """,
-
     "Skills Alignment": """\
 Produce a revised SKILLS section aligned to the job description.
 - Include only skills actually present in the resume.
@@ -53,7 +58,6 @@ JOB DESCRIPTION:
 RESUME SKILLS:
 {resume}
 """,
-
     "STAR Bullets (Experience)": """\
 Rewrite the EXPERIENCE bullets using the STAR pattern (Situation-Task-Action-Result)
 for RELEVANT roles only. Do not fabricate metrics.
@@ -64,12 +68,11 @@ JOB DESCRIPTION:
 RESUME EXPERIENCE:
 {resume}
 """,
-
     "CN/EN Bilingual Summary": """\
-Write a bilingual summary (Chinese + English), 2–3 lines each,
-aligned to the job description. Keep strictly to resume facts.
+Write a bilingual summary (Chinese + English), 2–3 lines each, aligned to the job description.
+Keep strictly to resume facts.
 
-JD:
+JOB DESCRIPTION:
 {job_desc}
 
 RESUME SUMMARY:
@@ -77,124 +80,191 @@ RESUME SUMMARY:
 """,
 }
 
-# ========== LOAD MATCH MODEL ==========
+# ----------------------------
+# Helpers: read TXT / PDF / DOCX in one place
+# ----------------------------
+def read_any(uploaded_file) -> str:
+    """Return plain text from uploaded TXT/PDF/DOCX."""
+    import PyPDF2
+    from docx import Document
+
+    name = (uploaded_file.name or "").lower()
+    data = uploaded_file.read()
+
+    if name.endswith(".txt"):
+        return data.decode("utf-8", errors="ignore")
+
+    if name.endswith(".pdf"):
+        reader = PyPDF2.PdfReader(io.BytesIO(data))
+        pages = []
+        for p in reader.pages:
+            try:
+                pages.append(p.extract_text() or "")
+            except Exception:
+                pass
+        return "\n".join(pages).strip()
+
+    if name.endswith(".docx"):
+        doc = Document(io.BytesIO(data))
+        return "\n".join(p.text for p in doc.paragraphs).strip()
+
+    # fallback try text decode
+    try:
+        return data.decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+def clean_text(t: str) -> str:
+    t = (t or "").replace("\r", "\n")
+    lines = [x.strip() for x in t.split("\n")]
+    out, blank = [], 0
+    for l in lines:
+        if l == "":
+            blank += 1
+            if blank <= 1:
+                out.append("")
+        else:
+            blank = 0
+            out.append(l)
+    return "\n".join(out).strip()
+
+# ----------------------------
+# Embedding model for match score
+# ----------------------------
 @st.cache_resource
-def load_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')
+def load_embed():
+    # small, fast model
+    return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
-model = load_model()
+embed_model = load_embed()
 
-def compute_match_score(resume_text, job_desc):
-    emb_resume = model.encode(resume_text, convert_to_tensor=True)
-    emb_job = model.encode(job_desc, convert_to_tensor=True)
-    score = util.cos_sim(emb_resume, emb_job).item()
-    return round(score * 100, 2)
+def compute_match_score(resume_text: str, jd_text: str) -> float:
+    r = embed_model.encode(resume_text, convert_to_tensor=True, normalize_embeddings=True)
+    j = embed_model.encode(jd_text, convert_to_tensor=True, normalize_embeddings=True)
+    score = float(util.cos_sim(r, j).item())
+    return round(max(0.0, min(1.0, score)) * 100, 2)
 
-# ========== OPENAI REWRITE ==========
+def keyword_gap(resume_text: str, jd_text: str):
+    import re, collections
+    def toks(s):
+        return re.findall(r"[A-Za-z][A-Za-z0-9+.#-]{1,}", s.lower())
+    stop = set("the a an and or of to for with on in from by as at is are be been was were you your our their they them it its this that".split())
+    rset = set([t for t in toks(resume_text) if t not in stop and len(t) >= 2])
+    jtok = [t for t in toks(jd_text) if t not in stop and len(t) >= 2]
+    freq = collections.Counter(jtok)
+    missing = [w for w,_ in freq.most_common(60) if w not in rset][:20]
+    present = [w for w,_ in freq.most_common(60) if w in rset][:20]
+    return missing, present
+
+# ----------------------------
+# OpenAI client + rewrite
+# ----------------------------
 def get_openai_key():
     return os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", "")
 
-def rewrite_resume(resume_text, job_desc, template, system_prompt, model_name, temperature=0.2):
+def rewrite_resume(resume_text, jd_text, template, system_prompt, model_name, temperature=0.2):
     key = get_openai_key()
     if not key:
-        return "[ERROR] Missing OPENAI_API_KEY. Add it in Streamlit → Settings → Secrets."
+        return "[ERROR] OPENAI_API_KEY missing. Add it in Streamlit → Settings → Secrets."
     client = OpenAI(api_key=key)
+    prompt = template.format(job_desc=jd_text, resume=resume_text)
+    try:
+        resp = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=temperature,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"[OpenAI error] {e}"
 
-    user_prompt = template.format(job_desc=job_desc, resume=resume_text)
-    resp = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=temperature,
-    )
-    return resp.choices[0].message.content.strip()
+# ----------------------------
+# Inputs: Upload OR Paste
+# ----------------------------
+st.markdown("### 📄 Resume Input")
+col_r1, col_r2 = st.columns([1,1])
+with col_r1:
+    up_resume = st.file_uploader("Upload Resume (PDF / DOCX / TXT)", type=["pdf","docx","txt"], key="resume")
+with col_r2:
+    up_jd = st.file_uploader("Upload Job Description (PDF / DOCX / TXT)", type=["pdf","docx","txt"], key="jd")
 
-# ========== STREAMLIT APP ==========
-st.title("🤖 AI-Powered Job Matcher & CV Optimizer")
-st.write("Upload or paste your resume and job description below to get your match score and optimized resume.")
+resume_text = read_any(up_resume) if up_resume else ""
+jd_text = read_any(up_jd) if up_jd else ""
 
-resume_text = st.text_area("📄 Paste your Resume", height=300)
-jd_text = st.text_area("💼 Paste Job Description", height=250)
+if not resume_text:
+    resume_text = st.text_area("Or paste your Resume here", height=260, key="resume_text_area")
+if not jd_text:
+    jd_text = st.text_area("Or paste Job Description here", height=220, key="jd_text_area")
 
-# ===== Settings =====
+resume_text = clean_text(resume_text)
+jd_text = clean_text(jd_text)
+
+# ----------------------------
+# Settings (template/model/temp)
+# ----------------------------
 st.markdown("### ⚙️ Settings")
-colA, colB, colC = st.columns(3)
-with colA:
-    template_name = st.selectbox("Rewrite Template", list(TEMPLATES.keys()), index=0)
-with colB:
+c1, c2, c3 = st.columns(3)
+with c1:
+    tpl_name = st.selectbox("Rewrite Template", list(TEMPLATES.keys()), index=0)
+with c2:
     model_choice = st.selectbox("LLM Model", ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"], index=0)
-with colC:
+with c3:
     temperature = st.slider("Creativity (temperature)", 0.0, 1.0, 0.2, 0.1)
 
-# ===== Analyze Button =====
+# ----------------------------
+# Run
+# ----------------------------
+st.markdown("---")
 if st.button("🚀 Analyze & Optimize", use_container_width=True):
     if not resume_text or not jd_text:
-        st.error("Please paste both resume and job description.")
+        st.error("Please provide both the resume and the job description (upload or paste).")
     else:
-        with st.spinner("Calculating job match score..."):
+        with st.spinner("Calculating Job Match Score..."):
             score = compute_match_score(resume_text, jd_text)
-        st.success(f"🎯 Job Match Score: {score}%")
+            missing, present = keyword_gap(resume_text, jd_text)
+        st.success(f"🎯 Job Match Score: **{score}%**")
+
+        with st.expander("🔎 Keyword Gap Analysis", expanded=True):
+            a, b = st.columns(2)
+            with a:
+                st.markdown("**Missing keywords (consider addressing):**")
+                st.write(", ".join(missing) if missing else "None — great alignment.")
+            with b:
+                st.markdown("**Already present:**")
+                st.write(", ".join(present) if present else "—")
 
         st.markdown("---")
-        with st.spinner("Rewriting resume with AI..."):
+        with st.spinner("Rewriting resume (facts preserved)..."):
             optimized = rewrite_resume(
-                resume_text,
-                jd_text,
-                TEMPLATES[template_name],
-                BASE_SYSTEM,
-                model_choice,
-                temperature,
+                resume_text, jd_text,
+                TEMPLATES[tpl_name], BASE_SYSTEM,
+                model_choice, temperature
             )
 
         st.subheader("🧠 Optimized Resume")
-        st.text_area("", optimized, height=400)
-        st.download_button("💾 Download Optimized Resume", optimized, file_name="optimized_resume.txt")
+        st.text_area("", optimized, height=420)
+        st.download_button("💾 Download Optimized Resume (.txt)", optimized, file_name="optimized_resume.txt", use_container_width=True)
 
-        # ===== Optional A/B Testing =====
+        # ---- A/B compare (optional) ----
         st.markdown("---")
         st.markdown("### 🧪 A/B Model Comparison (optional)")
-        ab = st.checkbox("Compare two models side-by-side")
-
-        if ab:
-            m1 = model_choice
+        if st.checkbox("Compare two models side-by-side"):
             m2 = st.selectbox("Second model", ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"], index=2, key="m2")
             colx, coly = st.columns(2)
-
             with colx:
-                st.write(f"**Model: {m1}**")
-                out1 = rewrite_resume(
-                    resume_text, jd_text,
-                    TEMPLATES[template_name], BASE_SYSTEM, m1, temperature,
-                )
+                st.write(f"**Model: {model_choice}**")
+                out1 = rewrite_resume(resume_text, jd_text, TEMPLATES[tpl_name], BASE_SYSTEM, model_choice, temperature)
                 st.text_area("", out1, height=320)
-
             with coly:
                 st.write(f"**Model: {m2}**")
-                out2 = rewrite_resume(
-                    resume_text, jd_text,
-                    TEMPLATES[template_name], BASE_SYSTEM, m2, temperature,
-                )
+                out2 = rewrite_resume(resume_text, jd_text, TEMPLATES[tpl_name], BASE_SYSTEM, m2, temperature)
                 st.text_area("", out2, height=320)
 
-# ===== Footer =====
+# ----------------------------
+# Footer
+# ----------------------------
 st.markdown("---")
-st.caption("Built by Max Lee — Powered by OpenAI GPT & SentenceTransformers")
-# === Evaluation inside the app (reads eval_pairs.csv from repo) ===
-with st.expander("📊 Evaluation (rank accuracy)"):
-    st.write("Runs metrics using eval_pairs.csv + files under data/resumes and data/jds.")
-    if st.button("Run evaluation now"):
-        import subprocess
-        try:
-            out = subprocess.run(
-                ["python", "eval_ranking.py"],
-                capture_output=True, text=True, check=True
-            )
-            st.code(out.stdout or "(no stdout)")
-            if out.stderr:
-                st.code(out.stderr)
-        except Exception as e:
-            st.error(f"Couldn't run evaluation: {e}")
-            st.info("If this fails on Streamlit Cloud, run locally: `python eval_ranking.py`.")
-
+st.caption("Privacy: content is processed in memory only. This tool improves presentation, not qualifications.")
