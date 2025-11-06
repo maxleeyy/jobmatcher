@@ -181,4 +181,20 @@ if st.button("🚀 Analyze & Optimize", use_container_width=True):
 # ===== Footer =====
 st.markdown("---")
 st.caption("Built by Max Lee — Powered by OpenAI GPT & SentenceTransformers")
+# === Evaluation inside the app (reads eval_pairs.csv from repo) ===
+with st.expander("📊 Evaluation (rank accuracy)"):
+    st.write("Runs metrics using eval_pairs.csv + files under data/resumes and data/jds.")
+    if st.button("Run evaluation now"):
+        import subprocess
+        try:
+            out = subprocess.run(
+                ["python", "eval_ranking.py"],
+                capture_output=True, text=True, check=True
+            )
+            st.code(out.stdout or "(no stdout)")
+            if out.stderr:
+                st.code(out.stderr)
+        except Exception as e:
+            st.error(f"Couldn't run evaluation: {e}")
+            st.info("If this fails on Streamlit Cloud, run locally: `python eval_ranking.py`.")
 
