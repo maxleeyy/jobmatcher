@@ -1,13 +1,14 @@
-import os, io, subprocess
+import os, io
 import streamlit as st
 from sentence_transformers import SentenceTransformer, util
 from openai import OpenAI
 
+# ------------------ UI SETUP ------------------
 st.set_page_config(page_title="AI Job Matcher + CV Optimizer", page_icon="🎯", layout="wide")
 st.title("🤖 AI-Powered Job Matcher & CV Optimizer")
-st.write("Upload or paste your resume and job description to get a match score, keyword alignment, and an AI-optimized resume.")
+st.write("Upload or paste your resume and job description to get a match score, keyword alignment, an AI-optimized resume, and evaluation metrics.")
 
-# ---------- PROMPTS ----------
+# ------------------ PROMPT TEMPLATES ------------------
 BASE_SYSTEM = (
     "You are an expert HR resume coach. Preserve factual accuracy — "
     "do not invent employers, dates, titles, or metrics. Improve clarity, "
@@ -57,27 +58,43 @@ JOB DESCRIPTION:
 RESUME EXPERIENCE:
 {resume}
 """,
+    "CN/EN Bilingual Summary": """Write a bilingual summary (Chinese + English), 2–3 lines each, aligned to the job description.
+Keep strictly to resume facts.
+
+JOB DESCRIPTION:
+{job_desc}
+
+RESUME SUMMARY:
+{resume}
+""",
 }
 
-# ---------- FILE READERS ----------
+# ------------------ FILE READERS ------------------
 def read_any(uploaded_file) -> str:
-    """Return plain text from TXT/PDF/DOCX (uses pypdf, python-docx)."""
+    """Return plain text from TXT/PDF/DOCX using pypdf + python-docx."""
     from pypdf import PdfReader
     from docx import Document
+
     name = (uploaded_file.name or "").lower()
     data = uploaded_file.read()
+
     if name.endswith(".txt"):
         return data.decode("utf-8", errors="ignore")
+
     if name.endswith(".pdf"):
         reader = PdfReader(io.BytesIO(data))
         pages = []
         for p in reader.pages:
-            try: pages.append(p.extract_text() or "")
-            except Exception: pass
+            try:
+                pages.append(p.extract_text() or "")
+            except Exception:
+                pass
         return "\n".join(pages).strip()
+
     if name.endswith(".docx"):
         doc = Document(io.BytesIO(data))
         return "\n".join(p.text for p in doc.paragraphs).strip()
+
     try:
         return data.decode("utf-8", errors="ignore")
     except Exception:
@@ -95,7 +112,7 @@ def clean_text(t: str) -> str:
             blank = 0; out.append(l)
     return "\n".join(out).strip()
 
-# ---------- MATCHING ----------
+# ------------------ MATCHING ------------------
 @st.cache_resource
 def load_embed():
     return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
@@ -118,27 +135,30 @@ def keyword_gap(resume_text: str, jd_text: str):
     present = [w for w,_ in freq.most_common(60) if w in rset][:20]
     return missing, present
 
-# ---------- OPENAI ----------
+# ------------------ OPENAI REWRITER ------------------
 def get_openai_key():
     return os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", "")
 
 def rewrite_resume(resume_text, jd_text, template, system_prompt, model_name, temperature=0.2):
     key = get_openai_key()
-    if not key: return "[ERROR] OPENAI_API_KEY missing. Add it in Streamlit → Settings → Secrets."
+    if not key:
+        return "[ERROR] OPENAI_API_KEY missing. Add it in Streamlit → Settings → Secrets."
     client = OpenAI(api_key=key)
     prompt = template.format(job_desc=jd_text, resume=resume_text)
     try:
         resp = client.chat.completions.create(
             model=model_name,
-            messages=[{"role":"system","content":system_prompt},
-                      {"role":"user","content":prompt}],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
             temperature=temperature,
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
         return f"[OpenAI error] {e}"
 
-# ---------- INPUTS ----------
+# ------------------ INPUTS ------------------
 st.markdown("### 📄 Resume Input")
 col_r1, col_r2 = st.columns(2)
 with col_r1:
@@ -154,7 +174,7 @@ if not jd_text:
     jd_text = st.text_area("Or paste Job Description here", height=200, key="jd_text_area")
 resume_text = clean_text(resume_text); jd_text = clean_text(jd_text)
 
-# ---------- SETTINGS ----------
+# ------------------ SETTINGS ------------------
 st.markdown("### ⚙️ Settings")
 c1, c2, c3 = st.columns(3)
 with c1:
@@ -166,7 +186,7 @@ with c3:
 
 st.markdown("---")
 
-# ---------- RUN ----------
+# ------------------ MAIN RUN ------------------
 if st.button("🚀 Analyze & Optimize", use_container_width=True):
     if not resume_text or not jd_text:
         st.error("Please provide both the resume and the job description (upload or paste).")
@@ -187,13 +207,16 @@ if st.button("🚀 Analyze & Optimize", use_container_width=True):
 
         st.markdown("---")
         with st.spinner("Rewriting resume (facts preserved)..."):
-            optimized = rewrite_resume(resume_text, jd_text, TEMPLATES[tpl_name], BASE_SYSTEM, model_choice, temperature)
+            optimized = rewrite_resume(
+                resume_text, jd_text,
+                TEMPLATES[tpl_name], BASE_SYSTEM,
+                model_choice, temperature
+            )
 
         st.subheader("🧠 Optimized Resume")
         st.text_area("", optimized, height=420)
         st.download_button("💾 Download Optimized Resume (.txt)", optimized, file_name="optimized_resume.txt", use_container_width=True)
 
-        # A/B compare
         st.markdown("---")
         st.markdown("### 🧪 A/B Model Comparison (optional)")
         if st.checkbox("Compare two models side-by-side"):
@@ -208,17 +231,56 @@ if st.button("🚀 Analyze & Optimize", use_container_width=True):
                 out2 = rewrite_resume(resume_text, jd_text, TEMPLATES[tpl_name], BASE_SYSTEM, m2, temperature)
                 st.text_area("", out2, height=320)
 
-# ---------- EVALUATION (runs eval_ranking.py if present) ----------
-with st.expander("📊 Evaluation (rank accuracy)"):
-    st.write("If you committed `eval_pairs.csv` and `eval_ranking.py`, you can run them here.")
-    if st.button("Run evaluation now"):
-        try:
-            out = subprocess.run(["python","eval_ranking.py"], capture_output=True, text=True, check=True)
-            st.code(out.stdout or "(no output)")
-            if out.stderr: st.code(out.stderr)
-        except Exception as e:
-            st.error(f"Couldn't run evaluation: {e}")
-            st.info("You can also run locally: `python eval_ranking.py`")
+# ------------------ INLINE EVALUATION ------------------
+import pandas as pd
+import numpy as np
+from pathlib import Path
 
+def _read_text_for_eval(p: str) -> str:
+    return Path(p).read_text(encoding="utf-8", errors="ignore")
+
+def _precision_at_k(labels_sorted, k=3):
+    topk = labels_sorted[:k]
+    positives = sum(1 for y in topk if y == 2)   # "Good"
+    return positives / k
+
+def _mrr(relevance_list):
+    for i, rel in enumerate(relevance_list, start=1):
+        if rel == 1:
+            return 1.0 / i
+    return 0.0
+
+with st.expander("📊 Evaluation (rank accuracy)"):
+    st.write("Loads `eval_pairs.csv` from repo root and computes Precision@3 + MRR using the same match scorer.")
+    csv_path = Path("eval_pairs.csv")
+    if not csv_path.exists():
+        st.info("`eval_pairs.csv` not found. Create it and referenced text files, then reload.")
+    else:
+        if st.button("Run evaluation now"):
+            try:
+                df = pd.read_csv(csv_path)
+                results, p3s, mrrs = [], [], []
+                for jd_path, group in df.groupby("jd_path"):
+                    jd_text_local = _read_text_for_eval(jd_path)
+                    scored = []
+                    for _, row in group.iterrows():
+                        r_text_local = _read_text_for_eval(row["resume_path"])
+                        s = compute_match_score(r_text_local, jd_text_local)
+                        scored.append((row["resume_path"], s, int(row["label"])))
+                    scored.sort(key=lambda x: x[1], reverse=True)
+                    y_sorted = [lab for _, _, lab in scored]
+                    rel_bin = [1 if y == 2 else 0 for y in y_sorted]
+                    p3s.append(_precision_at_k(y_sorted, k=3))
+                    mrrs.append(_mrr(rel_bin))
+                    results.extend([(jd_path, rp, round(s, 2), {0:"Poor",1:"Medium",2:"Good"}[lab])
+                                    for rp, s, lab in scored])
+
+                out = pd.DataFrame(results, columns=["JD","Resume","PredictedScore","TrueLabel"])
+                st.dataframe(out, use_container_width=True)
+                st.success(f"Precision@3 (avg): {np.mean(p3s):.3f}  ·  MRR (avg): {np.mean(mrrs):.3f}")
+            except Exception as e:
+                st.error(f"Evaluation failed: {e}")
+                st.info("Check file paths in `eval_pairs.csv` and ensure they exist under your repo.")
+                
 st.markdown("---")
 st.caption("Privacy: processed in memory only. Optimizes presentation; does not alter qualifications.")
